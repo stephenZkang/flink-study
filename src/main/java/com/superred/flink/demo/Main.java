@@ -56,6 +56,41 @@ public class Main  {
 //        streamingDemoWithMyParitition();
 //        streamingConnect();
 //        streamingFilter();
+        streamingUnion();
+
+    }
+
+    /**
+     *  Filter
+     * @throws Exception
+     */
+    public static void streamingUnion() throws Exception {
+        //获取Flink的运行环境
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
+        //设置并行度
+        DataStreamSource<Long> text1 = env.addSource(new MyNoParalleSource()).setParallelism(1);
+
+        DataStreamSource<Long> text2 = env.addSource(new MyNoParalleSource()).setParallelism(1);
+
+
+        DataStream<Long> union = text1.union(text2);
+
+
+        SingleOutputStreamOperator<Long> num = union.map(new MapFunction<Long, Long>() {
+            @Override
+            public Long map(Long value) throws Exception {
+                System.out.println("原始接收到数据：" + value);
+                return value;
+            }
+        });
+
+        //每2秒钟处理一次数据
+        DataStream<Long> sum = num.timeWindowAll(Time.seconds(2)).sum(0);
+        //打印结果
+        sum.print().setParallelism(1);
+
+        env.execute("streamingUnion");
 
     }
 

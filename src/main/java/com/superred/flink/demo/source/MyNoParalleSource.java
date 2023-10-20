@@ -24,7 +24,7 @@ public class MyNoParalleSource implements SourceFunction<Long> {
         while (isRunning) {
             ctx.collect(count);
             count++;
-            Thread.sleep(1000);
+            Thread.sleep(2000);
         }
     }
 

@@ -29,10 +29,14 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
+import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
+import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.streaming.connectors.redis.RedisSink;
 import org.apache.flink.streaming.connectors.redis.common.config.FlinkJedisPoolConfig;
@@ -41,8 +45,10 @@ import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommandDes
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisMapper;
 import org.apache.flink.util.Collector;
 
+import javax.annotation.Nullable;
+import java.text.SimpleDateFormat;
 import java.time.Duration;
-import java.util.Properties;
+import java.util.*;
 
 public class Main  {
 
@@ -57,23 +63,124 @@ public class Main  {
 //        streamingConnect();
 //        streamingFilter();
 //        streamingUnion();
-        streamingBroadcast();
+//        streamingBroadcast();
+//        streamingWindowWatermark();
+
+    }
+
+    /**
+     * 水印解释的非常到位，请看下面分享
+     *  https://www.cnblogs.com/rossiXYZ/p/12286407.html
+     * @throws Exception
+     */
+    public static void streamingWindowWatermark() throws Exception {
+        //定义socket的端口号
+        int port = 9000;
+        String ip = "10.66.77.35";
+        //获取运行环境
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        //设置使用eventtime，默认是使用processtime
+        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+
+
+        //设置并行度为1,默认并行度是当前机器的cpu数量
+        env.setParallelism(1);
+
+        //连接socket获取输入的数据
+        DataStream<String> text = env.socketTextStream(ip, port, "\n");
+
+        //解析输入的数据
+        DataStream<Tuple2<String, Long>> inputMap = text.map(new MapFunction<String, Tuple2<String, Long>>() {
+            @Override
+            public Tuple2<String, Long> map(String value) throws Exception {
+                String[] arr = value.split(",");
+                return new Tuple2<>(arr[0], Long.parseLong(arr[1]));
+            }
+        });
+
+        //抽取timestamp和生成watermark
+        DataStream<Tuple2<String, Long>> waterMarkStream = inputMap.assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks<Tuple2<String, Long>>() {
+
+            Long currentMaxTimestamp = 0L;
+            final Long maxOutOfOrderness = 10000L;// 最大允许的乱序时间是10s
+
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+            /**
+             * 定义生成watermark的逻辑
+             * 默认100ms被调用一次
+             */
+            @Nullable
+            @Override
+            public Watermark getCurrentWatermark() {
+                return new Watermark(currentMaxTimestamp - maxOutOfOrderness);
+            }
+
+            //定义如何提取timestamp
+            @Override
+            public long extractTimestamp(Tuple2<String, Long> element, long previousElementTimestamp) {
+                long timestamp = element.f1;
+                currentMaxTimestamp = Math.max(timestamp, currentMaxTimestamp);
+                long id = Thread.currentThread().getId();
+                System.out.println("currentThreadId:"+id+",key:"+element.f0+",eventtime:["+element.f1+"|"+sdf.format(element.f1)+"],currentMaxTimestamp:["+currentMaxTimestamp+"|"+
+                        sdf.format(currentMaxTimestamp)+"],watermark:["+getCurrentWatermark().getTimestamp()+"|"+sdf.format(getCurrentWatermark().getTimestamp())+"]");
+                return timestamp;
+            }
+        });
+
+        DataStream<String> window = waterMarkStream.keyBy(0)
+                .window(TumblingEventTimeWindows.of(Time.seconds(3)))//按照消息的EventTime分配窗口，和调用TimeWindow效果一样
+                .apply(new WindowFunction<Tuple2<String, Long>, String, Tuple, TimeWindow>() {
+                    /**
+                     * 对window内的数据进行排序，保证数据的顺序
+                     * @param tuple
+                     * @param window
+                     * @param input
+                     * @param out
+                     * @throws Exception
+                     */
+                    @Override
+                    public void apply(Tuple tuple, TimeWindow window, Iterable<Tuple2<String, Long>> input, Collector<String> out) throws Exception {
+                        String key = tuple.toString();
+                        List<Long> arrarList = new ArrayList<Long>();
+                        Iterator<Tuple2<String, Long>> it = input.iterator();
+                        while (it.hasNext()) {
+                            Tuple2<String, Long> next = it.next();
+                            arrarList.add(next.f1);
+                        }
+                        Collections.sort(arrarList);
+                        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+                        String result = key + "," + arrarList.size() + "," + sdf.format(arrarList.get(0)) + "," + sdf.format(arrarList.get(arrarList.size() - 1))
+                                + "," + sdf.format(window.getStart()) + "," + sdf.format(window.getEnd());
+                        out.collect(result);
+                    }
+                });
+        //测试-把结果打印到控制台即可
+        window.print();
+
+        //注意：因为flink是懒加载的，所以必须调用execute方法，上面的代码才会执行
+        env.execute("eventtime-watermark");
+
     }
 
     /**
      *  Broadcast
+     *  https://blog.csdn.net/allensandy/article/details/106221397
      * @throws Exception
      */
     public static void streamingBroadcast() throws Exception {
         //获取Flink的运行环境
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(4);
+        env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
 
         //获取数据源
         DataStreamSource<Long> text = env
                 .addSource(new MyNoParalleSource()).setParallelism(1);//注意：针对此source，并行度只能设置为1
 
-        DataStream<Long> num = text.broadcast().map(new MapFunction<Long, Long>() {
+        DataStream<Long> num = text
+                .broadcast()
+                .map(new MapFunction<Long, Long>() {
             @Override
             public Long map(Long value) throws Exception {
                 long id = Thread.currentThread().getId();

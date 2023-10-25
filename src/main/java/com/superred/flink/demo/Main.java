@@ -90,6 +90,7 @@ public class Main  {
 
         //获取flink的运行环境
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
 
         String hostname = "10.66.77.35";
         String delimiter = "\n";
